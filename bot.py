@@ -5,12 +5,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 # ============================= CONFIG =============================
-TELEGRAM_TOKEN = "8589870096:AAHahTpg6LNXbUwUMdt3q2EqVa2McIo14h8"                  # Change this!
-TELEGRAM_CHAT_IDS = ["5054484162", "497819952"]           # Add as many as you want
+TELEGRAM_TOKEN = "8589870096:AAHahTpg6LNXbUwUMdt3q2EqVa2McIo14h8"
+TELEGRAM_CHAT_IDS = ["5054484162", "497819952"]
 
-SCAN_THRESHOLD = 0.25      # Minimum % to be considered a candidate
-ALERT_THRESHOLD = 5.0      # Instant alert when spread >= ±5%
-ALERT_COOLDOWN = 60        # Seconds between alerts for same symbol
+SCAN_THRESHOLD = 0.25       # Min % to track
+ALERT_THRESHOLD = 5.0       # Instant alert at ±5%
+ALERT_COOLDOWN = 60         # Don't spam same symbol
+SUMMARY_INTERVAL = 300      # Summary every 5 minutes (300 sec)
 MAX_WORKERS = 15
 # ==================================================================
 
@@ -20,18 +21,20 @@ KUCOIN_ACTIVE_URL = "https://api-futures.kucoin.com/api/v1/contracts/active"
 KUCOIN_TICKER_URL = "https://api-futures.kucoin.com/api/v1/ticker?symbol={symbol}"
 
 def timestamp():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def log_heartbeat():
-    print(f"Bot alive - {timestamp()} - Watching for ±{ALERT_THRESHOLD}% spreads")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%26")
 
 def send_telegram(message):
     for chat_id in TELEGRAM_CHAT_IDS:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            requests.get(url, params={"chat_id": chat_id, "text": message, "disable_web_page_preview": True}, timeout=10)
+            requests.get(url, params={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True
+            }, timeout=10)
         except:
-            pass  # Silent fail — we don't want bot to crash
+            pass
 
 # ==================== SYMBOL & PRICE FETCHING ====================
 def get_binance_symbols():
@@ -93,8 +96,8 @@ def threaded_kucoin_prices(symbols):
 def calculate_spread(bin_bid, bin_ask, ku_bid, ku_ask):
     if not all([bin_bid, bin_ask, ku_bid, ku_ask]) or bin_ask <= 0:
         return None
-    pos = ((ku_bid - bin_ask) / bin_ask) * 100   # Long Binance / Short KuCoin
-    neg = ((ku_ask - bin_bid) / bin_bid) * 100   # Long Ku KuCoin / Short Binance
+    pos = ((ku_bid - bin_ask) / bin_ask) * 100
+    neg = ((ku_ask - bin_bid) / bin_bid) * 100
     if pos > 0.01:
         return pos
     if neg < -0.01:
@@ -103,18 +106,18 @@ def calculate_spread(bin_bid, bin_ask, ku_bid, ku_ask):
 
 # =========================== MAIN LOOP ===========================
 def main():
-    print(f"Binance ↔ KuCoin Spread Monitor STARTED - {timestamp()}")
-    print(f"Alert threshold: ±{ALERT_THRESHOLD}% | Cooldown: {ALERT_COOLDOWN}s")
-    send_telegram(f"Bot started and running 24/7\nWatching for ±{ALERT_THRESHOLD}% spreads")
-    
+    print(f"Binance ↔ KuCoin Monitor STARTED - {timestamp()}")
+    send_telegram("Bot started — watching for ±5%+ spreads\nSummaries every 5 min | Instant alerts on big moves")
+
     last_alert = {}
+    last_summary_time = 0
     heartbeat_counter = 0
 
     while True:
         try:
             common_symbols, ku_map = get_common_symbols()
             if not common_symbols:
-                print("No common symbols found, retrying in 10s...")
+                print("No common symbols — retrying...")
                 time.sleep(10)
                 continue
 
@@ -123,10 +126,7 @@ def main():
             ku_prices = threaded_kucoin_prices(ku_symbols)
 
             candidates = {}
-            max_pos = 0.0
-            max_pos_sym = None
-            max_neg = 0.0
-            max_neg_sym = None
+            max_pos = max_pos_sym = max_neg = max_neg_sym = None
 
             for sym in common_symbols:
                 bin_tick = bin_prices.get(sym)
@@ -137,62 +137,56 @@ def main():
 
                 spread = calculate_spread(bin_tick["bid"], bin_tick["ask"], ku_tick["bid"], ku_tick["ask"])
                 if spread is not None and abs(spread) >= SCAN_THRESHOLD:
-                    candidates[sym] = {
-                        "spread": spread,
-                        "bin_bid": bin_tick["bid"],
-                        "bin_ask": bin_tick["ask"],
-                        "ku_bid": ku_tick["bid"],
-                        "ku_ask": ku_tick["ask"]
-                    }
+                    candidates[sym] = spread
 
-                    if spread > max_pos:
-                        max_pos = spread
-                        max_pos_sym = sym
-                    if spread < max_neg:
-                        max_neg = spread
-                        max_neg_sym = sym
+                    if max_pos is None or spread > max_pos:
+                        max_pos, max_pos_sym = spread, sym
+                    if max_neg is None or spread < max_neg:
+                        max_neg, max_neg_sym = spread, sym
 
-                    # Instant alert on ±5%+
+                    # INSTANT ALERT ON ±5%+
                     if abs(spread) >= ALERT_THRESHOLD:
                         now = time.time()
                         if sym not in last_alert or now - last_alert[sym] > ALERT_COOLDOWN:
                             direction = "Long Binance / Short KuCoin" if spread > 0 else "Long KuCoin / Short Binance"
                             msg = (
                                 f"*BIG SPREAD ALERT*\n"
-                                f"`{sym}` → {spread:+.4f}%\n"
-                                f"Direction: {direction}\n"
-                                f"Binance: {bin_tick['bid']:.6f} ↔ {bin_tick['ask']:.6f}\n"
-                                f"KuCoin:  {ku_tick['bid']:.6f} ↔ {ku_tick['ask']:.6f}\n"
-                                f"Time: {timestamp()}"
+                                f"`{sym}` → *{spread:+.4f}%*\n"
+                                f"Direction → {direction}\n"
+                                f"Binance: `{bin_tick['bid']:.6f}` ↔ `{bin_tick['ask']:.6f}`\n"
+                                f"KuCoin : `{ku_tick['bid']:.6f}` ↔ `{ku_tick['ask']:.6f}`\n"
+                                f"{timestamp()}"
                             )
                             send_telegram(msg)
                             last_alert[sym] = now
-                            print(f"ALERT SENT: {sym} {spread:+.4f}%")
+                            print(f"ALERT → {sym} {spread:+.4f}%")
 
-            # Full scan summary
-            summary = f"*Scan Summary* - {timestamp()}\n"
-            summary += f"Candidates: {len(candidates)}\n"
-            if max_pos_sym:
-                summary += f"Max +ve: `{max_pos_sym}` → +{max_pos:.4f}%\n"
-            else:
-                summary += "No +ve spread\n"
-            if max_neg_sym:
-                summary += f"Max -ve: `{max_neg_sym}` → {max_neg:.4f}%\n"
-            else:
-                summary += "No -ve spread\n"
-            send_telegram(summary)
+            # SUMMARY ONLY EVERY 5 MINUTES
+            now = time.time()
+            if now - last_summary_time >= SUMMARY_INTERVAL:
+                summary = f"*Scan Summary* — {timestamp()}\n"
+                summary += f"Tracked: {len(candidates)} symbols\n"
+                if max_pos_sym:
+                    summary += f"Max +ve → `{max_pos_sym}`: *+{max_pos:.4f}%*\n"
+                else:
+                    summary += "No +ve spreads\n"
+                if max_neg_sym:
+                    summary += f"Max -ve → `{max_neg_sym}`: *{max_neg:.4f}%*\n"
+                else:
+                    summary += "No -ve spreads\n"
+                send_telegram(summary)
+                last_summary_time = now
+                print("Summary sent")
 
-            print(f"Scan complete | +{max_pos:+.3f}% | {max_neg:+.3f}% | Candidates: {len(candidates)}")
-
-            # Keep Railway awake + heartbeat every ~10 min
+            # Keep Railway alive
             heartbeat_counter += 1
-            if heartbeat_counter % 200 == 0:  # ~10 minutes (200 × 3s)
-                log_heartbeat()
+            if heartbeat13_counter % 400 == 0:  # ~20 min
+                print(f"Bot alive — {timestamp()}")
 
             time.sleep(3)
 
         except Exception as e:
-            print(f"Error in main loop: {e}")
+            print(f"Error: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
