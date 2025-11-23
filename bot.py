@@ -21,7 +21,7 @@ KUCOIN_ACTIVE_URL = "https://api-futures.kucoin.com/api/v1/contracts/active"
 KUCOIN_TICKER_URL = "https://api-futures.kucoin.com/api/v1/ticker?symbol={symbol}"
 
 def timestamp():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%26")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def send_telegram(message):
     for chat_id in TELEGRAM_CHAT_IDS:
@@ -180,7 +180,7 @@ def main():
 
             # Keep Railway alive
             heartbeat_counter += 1
-            if heartbeat13_counter % 400 == 0:  # ~20 min
+            if heartbeat_counter % 400 == 0:  # ~20 min
                 print(f"Bot alive — {timestamp()}")
 
             time.sleep(3)
